@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  BookMarked,
   ChevronLeft,
   ChevronRight,
   Clock,
   Columns2,
   Coffee,
+  Expand,
   LayoutList,
   ListTree,
+  Palette,
 } from "lucide-react";
 import { useRuku, useRukuVerses, useSurahs } from "@/hooks/useQuranData";
 import { useMemorizedVerses, useToggleMemorized, useWordProgress } from "@/hooks/useProgress";
@@ -15,14 +18,16 @@ import { useUiPrefs, useUpdateProfile } from "@/hooks/useProfile";
 import { useReadingTimer } from "@/hooks/useReadingTimer";
 import { ayahRangeLabel, cn, formatClock } from "@/lib/utils";
 import { VerseCard } from "@/components/reader/VerseCard";
+import { SplitPane } from "@/components/reader/SplitPane";
+import { FocusMode } from "@/components/reader/FocusMode";
 import { TafsirPanel } from "@/components/reader/TafsirPanel";
+import { TajweedLegend } from "@/components/reader/TajweedLegend";
 import { RukuSummaryCard } from "@/components/reader/RukuSummaryCard";
 import { Button } from "@/components/ui/button";
 import { ErrorState, LoadingBlock } from "@/components/ui/feedback";
 import { ProgressBar, Tooltip } from "@/components/ui/primitives";
 
 const TOTAL_RUKUS = 558;
-const SPLIT_STORAGE_KEY = "qs.readerSplit";
 
 export function Reader() {
   const params = useParams<{ rukuNumber: string }>();
@@ -49,6 +54,8 @@ export function Reader() {
 
   const [selectedAyah, setSelectedAyah] = useState<number | null>(null);
   const [expandedVerses, setExpandedVerses] = useState<Set<number>>(new Set());
+  const [focusMode, setFocusMode] = useState(false);
+  const [focusIndex, setFocusIndex] = useState(0);
   const { sessionSeconds, idle } = useReadingTimer(valid ? rukuNumber : null);
 
   const surah = surahs?.find((s) => s.number === ruku?.surah_number);
@@ -60,6 +67,57 @@ export function Reader() {
     document.querySelector("[data-verse-scroll]")?.scrollTo({ top: 0 });
   }, [rukuNumber, prefs.wordsExpanded, verseIds]);
 
+  // Focus mode can walk off either end of a ruku into the next one. Which end
+  // of the new ruku it lands on depends on the direction it left in — and the
+  // verses may still be loading when the route param changes, so placement
+  // waits for them and happens exactly once per ruku.
+  const focusEntryEdge = useRef<"start" | "end">("start");
+  const placedRuku = useRef<number | null>(null);
+  useEffect(() => {
+    if (!verses?.length || placedRuku.current === rukuNumber) return;
+    placedRuku.current = rukuNumber;
+    setFocusIndex(focusEntryEdge.current === "end" ? verses.length - 1 : 0);
+    focusEntryEdge.current = "start";
+  }, [rukuNumber, verses]);
+
+  // Keep the tafsir panel pointed at whatever focus mode is showing, so the
+  // reader is already on the right ayah when the user comes back out.
+  useEffect(() => {
+    if (!focusMode) return;
+    const verse = verses?.[focusIndex];
+    if (verse) setSelectedAyah(verse.ayah_number);
+  }, [focusMode, focusIndex, verses]);
+
+  const openFocus = useCallback((index: number) => {
+    setFocusIndex(index);
+    setFocusMode(true);
+  }, []);
+
+  const exitFocus = useCallback(() => {
+    setFocusMode(false);
+    const verse = verses?.[focusIndex];
+    if (!verse) return;
+    // Land on the ayah that was being read rather than the old scroll offset.
+    requestAnimationFrame(() => {
+      document.getElementById(`verse-${verse.id}`)?.scrollIntoView({ block: "center" });
+    });
+  }, [verses, focusIndex]);
+
+  // `F` from the reader opens focus mode on the selected ayah, or the first.
+  useEffect(() => {
+    if (focusMode) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "f" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.closest("input, textarea")) return;
+      if (!verses?.length) return;
+      const index = verses.findIndex((v) => v.ayah_number === selectedAyah);
+      openFocus(index >= 0 ? index : 0);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusMode, verses, selectedAyah, openFocus]);
+
   const toggleWords = useCallback((verseId: number) => {
     setExpandedVerses((current) => {
       const next = new Set(current);
@@ -68,6 +126,31 @@ export function Reader() {
       return next;
     });
   }, []);
+
+  const toggleTajweed = useCallback(() => {
+    updateProfile.mutate({ ui_prefs: { tajweed: !prefs.tajweed } });
+  }, [prefs.tajweed, updateProfile]);
+
+  /**
+   * Hands over to the mushaf reader at the page the reader is looking at —
+   * the selected ayah's page when there is one, otherwise where the ruku opens.
+   */
+  const switchToMushaf = useCallback(() => {
+    const selected = verses?.find((verse) => verse.ayah_number === selectedAyah);
+    const page = selected?.page_number ?? ruku?.page_start ?? verses?.[0]?.page_number;
+    if (!page) return;
+    updateProfile.mutate({ ui_prefs: { readerMode: "mushaf" } });
+    navigate(`/read/page/${page}`);
+  }, [verses, selectedAyah, ruku, navigate, updateProfile]);
+
+  // A reader who has chosen the mushaf gets it wherever a ruku is opened from
+  // — the browser, the dashboard, a bookmark. Only this direction redirects:
+  // the mushaf reader never sends anyone back here, so the two cannot ping-pong.
+  useEffect(() => {
+    if (prefs.readerMode !== "mushaf") return;
+    const page = ruku?.page_start ?? verses?.[0]?.page_number;
+    if (page) navigate(`/read/page/${page}`, { replace: true });
+  }, [prefs.readerMode, ruku, verses, navigate]);
 
   const memorizedCount = useMemo(
     () => verseIds.filter((id) => memorized?.has(id)).length,
@@ -168,6 +251,49 @@ export function Reader() {
               </div>
             </Tooltip>
 
+            <Tooltip content="Read this as a mushaf page — the printed Madani layout">
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="Switch to mushaf reader"
+                disabled={!verses?.length}
+                onClick={switchToMushaf}
+              >
+                <BookMarked className="size-4" aria-hidden />
+              </Button>
+            </Tooltip>
+
+            <Tooltip content="Focus mode — one ayah, fullscreen (F)">
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="Enter focus mode"
+                disabled={!verses?.length}
+                onClick={() => {
+                  const index = (verses ?? []).findIndex((v) => v.ayah_number === selectedAyah);
+                  openFocus(index >= 0 ? index : 0);
+                }}
+              >
+                <Expand className="size-4" aria-hidden />
+              </Button>
+            </Tooltip>
+
+            <Tooltip
+              content={
+                prefs.tajweed ? "Turn off tajweed colouring" : "Colour the text by tajweed rule"
+              }
+            >
+              <Button
+                size="icon"
+                variant={prefs.tajweed ? "outline" : "ghost"}
+                aria-label="Toggle tajweed colouring"
+                aria-pressed={prefs.tajweed}
+                onClick={toggleTajweed}
+              >
+                <Palette className="size-4" aria-hidden />
+              </Button>
+            </Tooltip>
+
             <Tooltip content="Expand every word breakdown">
               <Button
                 size="icon"
@@ -221,13 +347,15 @@ export function Reader() {
           reader={
             <div data-verse-scroll className="h-full overflow-y-auto px-6 py-6">
               <div className="mx-auto max-w-3xl space-y-4">
+                {prefs.tajweed ? <TajweedLegend /> : null}
+
                 <RukuSummaryCard
                   rukuNumber={rukuNumber}
                   surahName={surah?.name_english ?? ""}
                   verses={verses ?? []}
                 />
 
-                {(verses ?? []).map((verse) => (
+                {(verses ?? []).map((verse, index) => (
                   <VerseCard
                     key={verse.id}
                     verse={verse}
@@ -243,6 +371,8 @@ export function Reader() {
                     wordsExpanded={expandedVerses.has(verse.id)}
                     onToggleWords={() => toggleWords(verse.id)}
                     wordStatuses={wordStatuses ?? new Map()}
+                    onOpenFocus={() => openFocus(index)}
+                    tajweed={prefs.tajweed}
                   />
                 ))}
 
@@ -279,93 +409,46 @@ export function Reader() {
           }
         />
       )}
-    </div>
-  );
-}
 
-/**
- * Two panes with a draggable divider. The split is stored locally rather than
- * in the profile — it's a per-window layout choice, not a study preference.
- */
-function SplitPane({
-  reader,
-  tafsir,
-  tafsirFirst,
-}: {
-  reader: React.ReactNode;
-  tafsir: React.ReactNode;
-  tafsirFirst: boolean;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [tafsirWidth, setTafsirWidth] = useState<number>(() => {
-    const stored = Number(localStorage.getItem(SPLIT_STORAGE_KEY));
-    return Number.isFinite(stored) && stored >= 20 && stored <= 60 ? stored : 38;
-  });
-  const dragging = useRef(false);
-
-  useEffect(() => {
-    const onMove = (event: MouseEvent) => {
-      if (!dragging.current || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const fromLeft = ((event.clientX - rect.left) / rect.width) * 100;
-      const next = tafsirFirst ? fromLeft : 100 - fromLeft;
-      setTafsirWidth(Math.min(60, Math.max(20, next)));
-    };
-    const onUp = () => {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = "";
-      setTafsirWidth((width) => {
-        localStorage.setItem(SPLIT_STORAGE_KEY, String(width));
-        return width;
-      });
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [tafsirFirst]);
-
-  const divider = (
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      onMouseDown={() => {
-        dragging.current = true;
-        document.body.style.cursor = "col-resize";
-      }}
-      className="group relative w-px shrink-0 cursor-col-resize bg-border"
-    >
-      <div className="absolute inset-y-0 -left-1 -right-1 transition-colors group-hover:bg-accent/20" />
-    </div>
-  );
-
-  const tafsirPane = (
-    <div
-      className="min-w-0 shrink-0 border-border bg-surface/40"
-      style={{ width: `${tafsirWidth}%` }}
-    >
-      {tafsir}
-    </div>
-  );
-
-  return (
-    <div ref={containerRef} className="flex min-h-0 flex-1">
-      {tafsirFirst ? (
-        <>
-          {tafsirPane}
-          {divider}
-          <div className="min-w-0 flex-1">{reader}</div>
-        </>
-      ) : (
-        <>
-          <div className="min-w-0 flex-1">{reader}</div>
-          {divider}
-          {tafsirPane}
-        </>
-      )}
+      {focusMode ? (
+        <FocusMode
+          verses={verses ?? []}
+          index={focusIndex}
+          onIndexChange={setFocusIndex}
+          onExit={exitFocus}
+          surahName={surah?.name_english ?? ""}
+          rukuNumber={rukuNumber}
+          rukuInSurah={ruku?.ruku_in_surah ?? null}
+          memorized={memorized ?? new Set()}
+          onToggleMemorized={(verse) =>
+            toggleMemorized.mutate({
+              verseId: verse.id,
+              memorized: !(memorized?.has(verse.id) ?? false),
+            })
+          }
+          wordStatuses={wordStatuses ?? new Map()}
+          sessionSeconds={sessionSeconds}
+          loading={versesLoading}
+          tajweed={prefs.tajweed}
+          onToggleTajweed={toggleTajweed}
+          onPrevRuku={
+            rukuNumber > 1
+              ? () => {
+                  focusEntryEdge.current = "end";
+                  navigate(`/read/${rukuNumber - 1}`);
+                }
+              : undefined
+          }
+          onNextRuku={
+            rukuNumber < TOTAL_RUKUS
+              ? () => {
+                  focusEntryEdge.current = "start";
+                  navigate(`/read/${rukuNumber + 1}`);
+                }
+              : undefined
+          }
+        />
+      ) : null}
     </div>
   );
 }
