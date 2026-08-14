@@ -48,6 +48,12 @@ jobs:
           # client-safe; access is constrained by Row Level Security.
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          # Ad-hoc signing. Without an identity the bundle has no
+          # _CodeSignature at all, and Gatekeeper answers a quarantined
+          # unsigned app with "damaged" rather than an override prompt. This
+          # is not a Developer ID and does not notarize — it only buys the
+          # normal right-click-Open path instead of a terminal command.
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           projectPath: quran-studio
           # --bundles overrides the deb/appimage targets pinned in tauri.conf.json.
