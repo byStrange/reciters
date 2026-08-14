@@ -1,0 +1,60 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    # macos-latest is Apple Silicon; the universal target cross-builds x86_64 too.
+    runs-on: macos-latest
+    # The Supabase secrets are environment-scoped, not repo-scoped; without this
+    # they resolve to empty strings and the build silently ships a broken app.
+    environment: prod
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The QCF mushaf fonts in public/fonts are LFS-tracked. Without this
+          # the checkout yields pointer files, which Vite copies into dist
+          # verbatim and the app ships with unrenderable Arabic text.
+          lfs: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: quran-studio/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: quran-studio/src-tauri -> target
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: quran-studio
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          # Baked into the frontend bundle by Vite. The publishable key is
+          # client-safe; access is constrained by Row Level Security.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+        with:
+          projectPath: quran-studio
+          # --bundles overrides the deb/appimage targets pinned in tauri.conf.json.
+          args: --target universal-apple-darwin --bundles dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quran-studio-macos-universal
+          path: quran-studio/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
